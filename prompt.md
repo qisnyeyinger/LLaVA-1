@@ -1,10 +1,229 @@
 ### 原始 LLaVA 推理
 ```bash
-python -m llava.serve.cli \
+CUDA_VISIBLE_DEVICES=0 python -m llava.serve.cli \
     --model-path /data1/cwk/mllm/models/llava-v1.5-7b \
     --image-file "/data1/cwk/mllm/project/LLaVA/test.png" \
     --load-4bit
 ```
+# Role
+You are a research-level engineer familiar with LLaVA-1.5 (7B/13B), HuggingFace Transformers internals, autoregressive decoding, cross-attention, KV cache, and inference-time model control.
+
+Your task is to implement an inference-only method called:
+
+Reasoning-Coupled Progressive Visual Token Pruning with Directed Residual Contrastive Decoding (RCPP + DRCD)
+
+in the official GitHub LLaVA-1.5 codebase.
+
+You must NOT modify model architecture and must NOT add trainable parameters.
+
+---
+
+# High-level Goal
+
+During autoregressive decoding, dynamically evaluate whether each visual token is still semantically consistent with the current reasoning state, progressively suppress or prune inconsistent visual tokens, and explicitly counteract their influence at the logit level.
+
+All changes must happen ONLY at inference time.
+
+---
+
+# Core Mechanism (Strict Requirements)
+
+## 1. Reasoning State Extraction
+
+At decoding step t:
+
+- Extract the decoder hidden state of the last layer and last generated token:
+  - Use: outputs.hidden_states[-1][:, -1, :]
+- Treat this vector as the current reasoning state h_t
+
+---
+
+## 2. Reasoning-aware Visual Token Reconstruction
+
+For each visual token i:
+
+- Do NOT use static visual embeddings directly
+- Reconstruct a reasoning-aware visual representation using decoder-to-vision cross-attention
+
+Implementation constraints:
+- Reuse existing cross-attention weights (no extra forward pass)
+- Use only high-level layers (e.g., last 2–4 decoder layers)
+
+Procedure:
+- For each selected decoder layer l:
+  - Obtain cross-attention weights alpha[t, i, l]
+  - Obtain visual token hidden state v_i[l]
+- Compute:
+  - reconstructed_visual_i = sum over l of (alpha[t, i, l] * v_i[l])
+
+This reconstruction is ONLY for semantic alignment, NOT direct importance scoring.
+
+---
+
+## 3. Instant Semantic Consistency Scoring
+
+For each visual token i:
+
+- Compute cosine similarity between:
+  - current reasoning state h_t
+  - reconstructed_visual_i
+- Denote this score as s_i_t
+
+This score is continuous and used for temporal accumulation.
+
+---
+
+## 4. Cross-step Consistency Accumulation (EMA)
+
+For each visual token i, maintain a running consistency score S_i:
+
+- Initialize once at the first decoding step
+- Update at every decoding step:
+  - S_i = gamma * S_i + (1 - gamma) * s_i_t
+
+gamma is a momentum coefficient (e.g., 0.8–0.95)
+
+Low consistency must persist across multiple steps to trigger suppression.
+
+---
+
+## 5. Dynamic Visual Token Grouping
+
+At each decoding step:
+
+- Split visual tokens into two sets based on S_i:
+  - Core evidence set C: S_i >= tau
+  - Noise / interference set N: S_i < tau
+
+tau is a configurable threshold.
+
+---
+
+## 6. Directed Residual Contrastive Decoding (DRCD)
+
+Using attention masks ONLY (no extra model passes):
+
+- Compute logits_C:
+  - Decoder attends only to visual tokens in set C
+- Compute logits_N:
+  - Decoder attends only to visual tokens in set N
+
+Final logits for decoding:
+- final_logits = logits_C - lambda_t * logits_N
+
+lambda_t is a step-dependent contrast coefficient.
+
+---
+
+## 7. Progressive Scheduling
+
+As decoding step increases:
+
+- Gradually increase pruning strength
+- Gradually increase lambda_t
+
+Early steps:
+- Preserve more visual tokens
+- Small lambda_t
+
+Later steps:
+- Aggressive suppression
+- Larger lambda_t
+- Reduce KV cache size if possible
+
+---
+
+# Required Code Locations
+
+You must inspect and modify the following parts of the LLaVA-1.5 codebase:
+
+1. Autoregressive generation loop
+   - llava/model/language_model/llava_llama.py
+   - or modeling_llava.py
+
+2. Enable and capture:
+   - output_hidden_states = True
+   - output_attentions = True
+
+3. Decoder-to-vision cross-attention
+   - NOT self-attention
+   - Only cross-modal attention weights
+
+4. Attention mask handling
+   - Preserve text tokens
+   - Dynamically mask visual tokens
+
+---
+
+# Required State Variables (Must Be Explicitly Added)
+
+- visual_consistency_scores: tensor of shape [num_visual_tokens]
+- gamma: EMA momentum
+- tau: consistency threshold
+- lambda_t: step-dependent contrast coefficient
+
+These must persist across decoding steps.
+
+---
+
+# Implementation Order (Follow Exactly)
+
+Step 1:
+- Enable hidden_states and cross_attentions
+- Verify extraction of:
+  - h_t
+  - decoder-to-vision attention
+
+Step 2:
+- Implement reasoning-aware visual reconstruction as a standalone function
+
+Step 3:
+- Implement consistency scoring + EMA accumulation
+
+Step 4:
+- Implement dynamic token grouping (C / N)
+
+Step 5:
+- Implement attention-mask-based computation of logits_C and logits_N
+  - Within the SAME decoding step
+
+Step 6:
+- Apply residual contrastive logits fusion
+- Replace original logits before sampling / greedy decoding
+
+Step 7:
+- Add progressive scheduling for pruning ratio and lambda_t
+
+---
+
+# Hard Constraints
+
+- DO NOT change model weights
+- DO NOT add trainable parameters
+- DO NOT run full extra forward passes
+- DO NOT affect training code
+- Inference-only modifications
+
+---
+
+# Final Deliverables
+
+- Fully runnable modified LLaVA-1.5 inference code
+- Clear inline comments mapping each block to the method stages
+- A minimal example showing:
+  - Original LLaVA inference
+  - Inference with RCPP + DRCD enabled
+
+If any implementation detail in LLaVA-1.5 does not exactly match the assumptions above, implement the closest engineering approximation and document the deviation in comments.
+
+
+
+## ###########################################################################################################
+## ###########################################################################################################
+## ###########################################################################################################
+## ###########################################################################################################
+## ###########################################################################################################
+
 ## Method: Reasoning-Coupled Progressive Visual Token Pruning
 
 多模态大模型在视觉理解任务中产生幻觉的一个重要原因在于：  
