@@ -132,11 +132,10 @@ s_{i,t} = \cos(h_t,\; \tilde{v}_i)
 
 该渐进式策略确保视觉上下文重构与推理深度自然对齐，实现稳定性与纠偏能力之间的平衡。
 
-### 原始 LLaVA 推理测试指令
+### 原始 LLaVA 推理测试指令（可供改进后模型的测试）
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -m llava.serve.cli \
     --model-path /data1/cwk/mllm/models/llava-v1.5-7b \
     --image-file "/data1/cwk/mllm/project/LLaVA/test.png" \
     --load-4bit
 ```
-你需要根据我的论文思路，完成这个项目，并给我最终的测试代码（参考原始llava 1.5），我要通过提问“please describe the image in detail”来判断改进后的模型相对与原始llava 1.5,有了哪些变化。
